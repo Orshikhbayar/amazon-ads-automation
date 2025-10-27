@@ -78,6 +78,10 @@ def translate_keywords_to_japanese(keywords: list[str]) -> list[str]:
 # FLASK APP SETUP
 # ---------------------------
 app = Flask(__name__)
+@app.route("/")
+def index():
+    return send_from_directory('public', 'index.html')
+
 CORS(app)
 
 # Check environment vars
