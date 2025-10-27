@@ -93,13 +93,7 @@ if missing_env:
 # ---------------------------
 # ROUTES
 # ---------------------------
-@app.route("/")
-def index():
-    """Serve frontend HTML."""
-    html_path = os.path.join(PUBLIC_DIR, "index.html")
-    if os.path.exists(html_path):
-        return send_from_directory(PUBLIC_DIR, "index.html")
-    return "<h1>API is running</h1>", 200
+
 
 @app.route("/health")
 def health():
