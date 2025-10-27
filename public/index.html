@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Amazon広告RAGアシスタント</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{
+      font-family:'Noto Sans JP','Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+      background:#f9fafb;color:#0f1419;height:100vh;line-height:1.5;overflow:hidden;
+    }
+    .split-container{display:flex;height:100vh;width:100vw}
+
+    /* LEFT column */
+    .left-panel{
+      width:40%;background:#fff;padding:40px;box-shadow:2px 0 10px rgba(0,0,0,.05);
+      display:flex;flex-direction:column;gap:32px;overflow-y:auto;
+      -webkit-overflow-scrolling:touch;
+    }
+
+    /* RIGHT column (scrollable) */
+    .right-panel{
+      width:60%;background:#f9fafb;padding:40px;display:flex;flex-direction:column;gap:24px;
+      overflow-y:auto; /* whole right side can scroll */
+      -webkit-overflow-scrolling:touch;
+    }
+
+    .app-title{text-align:center;margin-bottom:8px}
+    .app-title h1{font-size:24px;font-weight:700;margin-bottom:8px}
+    .app-title p{font-size:14px;color:#6b7280}
+
+    .form-section,.results-section{
+      background:#fff;border-radius:12px;padding:24px;
+      box-shadow:0 1px 3px rgba(0,0,0,.1);border:1px solid #e5e7eb
+    }
+    .section-header{
+      font-size:18px;font-weight:600;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #f3f4f6
+    }
+
+    .form-group{margin-bottom:24px}
+    .form-group label{
+      display:block;font-weight:600;margin-bottom:12px;color:#4c1d95;font-size:15px;position:relative;padding-left:20px
+    }
+    .form-group label::before{content:'✨';position:absolute;left:0;top:0;font-size:14px}
+    .text-input{
+      width:100%;min-height:120px;padding:12px 16px;border:1px solid #d1d5db;border-radius:8px;
+      background:#fff;font-family:inherit;font-size:14px;transition:.2s;resize:vertical
+    }
+    .text-input:focus{outline:none;border-color:#0073bb;box-shadow:0 0 0 3px rgba(0,115,187,.1)}
+
+    .slider-container{display:flex;flex-direction:column;gap:12px}
+    .slider-header{display:flex;justify-content:space-between;align-items:center}
+    .slider-value{
+      font-weight:700;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+      font-size:16px;padding:6px 12px;border-radius:12px;background-color:rgba(102,126,234,.1);
+      border:1px solid rgba(102,126,234,.2)
+    }
+    .slider{
+      width:100%;height:8px;border-radius:4px;background:linear-gradient(90deg,#e2e8f0 0%,#cbd5e1 100%);
+      outline:none;appearance:none;-webkit-appearance:none;cursor:pointer;transition:.3s
+    }
+    .slider:hover{background:linear-gradient(90deg,#cbd5e1 0%,#94a3b8 100%)}
+    .slider::-webkit-slider-thumb{
+      -webkit-appearance:none;width:24px;height:24px;border-radius:50%;
+      background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+      box-shadow:0 4px 12px rgba(102,126,234,.4),0 2px 4px rgba(118,75,162,.3);transition:.3s
+    }
+    .slider::-webkit-slider-thumb:hover{transform:scale(1.1)}
+
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;padding:12px 24px;border-radius:8px;
+      font-size:16px;font-weight:600;cursor:pointer;transition:.2s;border:none;gap:8px;width:100%
+    }
+    .btn-primary{background:linear-gradient(135deg,#0073bb 0%,#005a94 100%);color:#fff;
+      box-shadow:0 4px 12px rgba(0,115,187,.3)}
+    .btn-primary:hover{transform:translateY(-2px)}
+
+    .table-container{
+      overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:0;background:#fff;
+      box-shadow:0 1px 3px rgba(0,0,0,.1)
+    }
+    table{width:100%;border-collapse:collapse;background:#fff}
+    th{background:#f9fafb;padding:16px;text-align:left;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;font-size:14px}
+    td{padding:16px;border-bottom:1px solid #f3f4f6;font-size:14px;color:#0f1419}
+    tr:last-child td{border-bottom:none}
+    tr:hover{background:#f9fafb}
+
+    /* Suggested panel internal scroll (extra safety) */
+    .suggested-scroll{
+      max-height: calc(100vh - 180px); /* keeps header/padding visible */
+      overflow-y:auto;
+      -webkit-overflow-scrolling:touch;
+      padding-right:8px;
+    }
+
+    .segment-card{background:#fff;border-radius:8px;padding:20px;margin-bottom:16px;border-left:4px solid #0073bb;box-shadow:0 2px 4px rgba(0,0,0,.1)}
+    .segment-title{font-size:16px;font-weight:600;margin-bottom:12px}
+    .segment-section{margin-bottom:12px}
+    .segment-section h4{font-size:12px;font-weight:600;color:#6b7280;margin-bottom:6px;letter-spacing:.5px;text-transform:uppercase}
+    .keywords{display:flex;flex-wrap:wrap;gap:6px}
+    .keyword-tag{background:#f0f9ff;color:#0369a1;padding:4px 8px;border-radius:6px;font-size:12px;font-weight:500;border:1px solid #bae6fd}
+    .headlines{display:flex;flex-direction:column;gap:8px}
+    .headline{background:#f9fafb;padding:12px;border-radius:6px;border:1px solid #e5e7eb;font-weight:500}
+
+    .loading{display:flex;align-items:center;justify-content:center;padding:60px;flex-direction:column;gap:16px}
+    .spinner{width:40px;height:40px;border:4px solid rgba(102,126,234,.2);border-top:4px solid #667eea;border-radius:50%;animation:spin 1s linear infinite;position:relative}
+    .spinner::after{content:'';position:absolute;top:-4px;left:-4px;width:40px;height:40px;border:4px solid transparent;border-top:4px solid #764ba2;border-radius:50%;animation:spin 1.5s linear infinite reverse}
+    .loading-text{color:#64748b;font-size:14px}
+    @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+
+    @media (max-width: 768px){
+      .split-container{flex-direction:column}
+      .left-panel,.right-panel{width:100%;height:auto;overflow:visible}
+      .suggested-scroll{max-height:none}
+    }
+  </style>
+</head>
+<body>
+  <div class="split-container">
+    <!-- LEFT: Form + Retrieved Segments -->
+    <div class="left-panel">
+      <div class="app-title">
+        <h1>Amazon広告RAGアシスタント</h1>
+        <p>AI駆動のオーディエンスターゲティングとセグメント生成</p>
+      </div>
+
+      <div class="form-section">
+        <div class="form-group">
+          <label for="campaign-brief">キャンペーン概要</label>
+          <textarea id="campaign-brief" class="text-input" placeholder="キャンペーンの目標、ターゲットオーディエンス、主要メッセージ、商品詳細を記述してください..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <div class="slider-container">
+            <div class="slider-header">
+              <label>検索するセグメント数</label>
+              <span class="slider-value">5</span>
+            </div>
+            <input type="range" class="slider" min="1" max="10" value="5" oninput="updateSliderValue(this)">
+            <p style="color:#6b7280;font-size:12px;margin-top:8px;">データベースから取得するオーディエンスセグメントの数（1-10）</p>
+          </div>
+        </div>
+
+        <!-- hidden keyword weight (kept) -->
+        <input type="hidden" id="keyword-weight" value="0.5">
+
+        <button class="btn btn-primary" onclick="generateComplete()">
+          <span>✨</span> 生成
+        </button>
+      </div>
+
+      <!-- Retrieved Segments -->
+      <div class="results-section">
+        <div class="section-header">取得されたセグメント</div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>セグメント名</th>
+                <th>マッチ率 %</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colspan="2" style="text-align:center;color:#6b7280;padding:32px;">
+                  キャンペーン概要を入力して「生成」をクリックして結果を表示
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Suggested Target Segments (ALWAYS OPEN + SCROLLABLE) -->
+    <div class="right-panel">
+      <div class="results-section">
+        <div class="section-header">提案されたターゲットセグメント</div>
+        <div id="suggested_panel" class="suggested-scroll">
+          <p style="color:#6b7280;text-align:center;">「生成」をクリックしてAI駆動のセグメント推奨を表示</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function updateSliderValue(slider){
+      const valueSpan = slider.parentElement.querySelector('.slider-value');
+      valueSpan.textContent = slider.value;
+    }
+
+    async function generateComplete(){
+      const campaignBrief = document.getElementById('campaign-brief').value;
+      const topK = document.querySelector('input[min="1"]').value;
+      const keywordWeight = document.getElementById('keyword-weight').value;
+      const enableKeywords = true;
+
+      if(!campaignBrief.trim()){
+        alert('キャンペーン概要を入力してください');
+        return;
+      }
+      try{
+        showLoading('セグメントを取得し、出力を生成中...');
+
+        // 1) retrieval
+        const r = await fetch('/api/retrieve',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            campaign_brief:campaignBrief,
+            top_k:parseInt(topK),
+            keyword_weight:parseFloat(keywordWeight),
+            enable_keywords:enableKeywords
+          })
+        });
+        const rData = await r.json();
+        if(!r.ok){ alert('取得エラー: ' + rData.error); hideLoading(); return; }
+        updateResultsTable(rData.segments);
+
+        // 2) generation
+        const g = await fetch('/api/generate',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            campaign_brief:campaignBrief,
+            top_k:parseInt(topK),
+            keyword_weight:parseFloat(keywordWeight),
+            enable_keywords:enableKeywords
+          })
+        });
+        const gData = await g.json();
+        if(g.ok){
+          if(gData.segments){ updateResultsTable(gData.segments); }
+          if(gData.generated_segments && gData.generated_segments.length>0){
+            updateProposedSegments(gData.generated_segments);
+          }
+        }else{
+          alert('生成エラー: ' + gData.error);
+        }
+      }catch(err){
+        alert('Network error: ' + err.message);
+      }finally{
+        hideLoading();
+      }
+    }
+
+    function updateResultsTable(segments){
+      const tbody = document.querySelector('tbody');
+      if(!segments || segments.length===0){
+        tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#64748b;">セグメントが見つかりません</td></tr>';
+        return;
+      }
+      tbody.innerHTML = segments.map(s => `
+        <tr>
+          <td>${s.name}</td>
+          <td>${s.match_percent.toFixed(1)}%</td>
+        </tr>`).join('');
+    }
+
+    function updateProposedSegments(segments){
+      const container = document.getElementById('suggested_panel');
+      if(!segments || segments.length===0){
+        container.innerHTML = '<p style="color:#64748b;text-align:center;">AI生成セグメントはありません</p>';
+        return;
+      }
+      container.innerHTML = segments.map(seg => `
+        <div class="segment-card">
+          <div class="segment-title">${seg.name || '名前なしセグメント'}</div>
+          <div class="segment-section"><h4>適合理由</h4><p>${seg.why_fits || '説明がありません'}</p></div>
+          <div class="segment-section"><h4>キーワード</h4>
+            <div class="keywords">${(seg.keywords || []).map(kw=>`<span class="keyword-tag">${kw}</span>`).join('')}</div>
+          </div>
+          <div class="segment-section"><h4>見出し</h4>
+            <div class="headlines">${(seg.headlines || []).map(h=>`<div class="headline">${h}</div>`).join('')}</div>
+          </div>
+          <div class="segment-section"><h4>説明</h4><p>${seg.description || '説明がありません'}</p></div>
+        </div>`).join('');
+    }
+
+    function showLoading(msg){
+      hideLoading();
+      const div = document.createElement('div');
+      div.id='loading'; div.className='loading';
+      div.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(248,250,252,.9);z-index:1000;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;';
+      div.innerHTML = `<div class="spinner"></div><div class="loading-text">${msg}</div>`;
+      document.body.appendChild(div);
+    }
+    function hideLoading(){
+      const el = document.getElementById('loading'); if(el) el.remove();
+    }
+
+    // init slider display
+    document.querySelectorAll('.slider').forEach(updateSliderValue);
+  </script>
+</body>
+</html>
