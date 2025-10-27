@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Amazon広告RAGアシスタント</title>
+  <title>Amazon Ads アシスタント</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
@@ -123,24 +123,23 @@
     <!-- LEFT: Form + Retrieved Segments -->
     <div class="left-panel">
       <div class="app-title">
-        <h1>Amazon広告RAGアシスタント</h1>
-        <p>AI駆動のオーディエンスターゲティングとセグメント生成</p>
+        <h1>Amazon Ads アシスタント</h1>
       </div>
 
       <div class="form-section">
         <div class="form-group">
-          <label for="campaign-brief">キャンペーン概要</label>
-          <textarea id="campaign-brief" class="text-input" placeholder="キャンペーンの目標、ターゲットオーディエンス、主要メッセージ、商品詳細を記述してください..."></textarea>
+          <label for="campaign-brief">ターゲットオーディエンスについて</label>
+          <textarea id="campaign-brief" class="text-input" placeholder="ターゲットオーディエンスについて詳細を入力してください..."></textarea>
         </div>
 
         <div class="form-group">
           <div class="slider-container">
             <div class="slider-header">
-              <label>検索するセグメント数</label>
+              <label>マッチするセグメント数</label>
               <span class="slider-value">5</span>
             </div>
             <input type="range" class="slider" min="1" max="10" value="5" oninput="updateSliderValue(this)">
-            <p style="color:#6b7280;font-size:12px;margin-top:8px;">データベースから取得するオーディエンスセグメントの数（1-10）</p>
+            <p style="color:#6b7280;font-size:12px;margin-top:8px;">データベースからマッチするセグメントの数（1-10）</p>
           </div>
         </div>
 
@@ -148,14 +147,12 @@
         <input type="hidden" id="keyword-weight" value="0.5">
 
         <button class="btn btn-primary" onclick="generateComplete()">
-          <span>✨</span> 生成
+          <span>✨</span> 検索
         </button>
       </div>
 
       <!-- Retrieved Segments -->
       <div class="results-section">
-        <div class="section-header">取得されたセグメント</div>
-        <div class="table-container">
           <table>
             <thead>
               <tr>
@@ -166,21 +163,20 @@
             <tbody>
               <tr>
                 <td colspan="2" style="text-align:center;color:#6b7280;padding:32px;">
-                  キャンペーン概要を入力して「生成」をクリックして結果を表示
+                  表示できるセグメント情報はありません。<br> 検索完了後に表示されます。
                 </td>
               </tr>
             </tbody>
           </table>
-        </div>
       </div>
     </div>
 
     <!-- RIGHT: Suggested Target Segments (ALWAYS OPEN + SCROLLABLE) -->
     <div class="right-panel">
       <div class="results-section">
-        <div class="section-header">提案されたターゲットセグメント</div>
+        <div class="section-header">マッチしたセグメント</div>
         <div id="suggested_panel" class="suggested-scroll">
-          <p style="color:#6b7280;text-align:center;">「生成」をクリックしてAI駆動のセグメント推奨を表示</p>
+          <p style="color:#6b7280;text-align:center;">表示できるセグメント情報はありません。<br> 検索完了後に表示されます。</p>
         </div>
       </div>
     </div>
@@ -199,11 +195,11 @@
       const enableKeywords = true;
 
       if(!campaignBrief.trim()){
-        alert('キャンペーン概要を入力してください');
+        alert('詳細を入力してください');
         return;
       }
       try{
-        showLoading('セグメントを取得し、出力を生成中...');
+        showLoading('検索中...');
 
         // 1) retrieval
         const r = await fetch('/api/retrieve',{
@@ -216,7 +212,7 @@
           })
         });
         const rData = await r.json();
-        if(!r.ok){ alert('取得エラー: ' + rData.error); hideLoading(); return; }
+        if(!r.ok){ alert('検索エラー: ' + rData.error); hideLoading(); return; }
         updateResultsTable(rData.segments);
 
         // 2) generation
@@ -261,7 +257,7 @@
     function updateProposedSegments(segments){
       const container = document.getElementById('suggested_panel');
       if(!segments || segments.length===0){
-        container.innerHTML = '<p style="color:#64748b;text-align:center;">AI生成セグメントはありません</p>';
+        container.innerHTML = '<p style="color:#64748b;text-align:center;">表示できるセグメントはありません</p>';
         return;
       }
       container.innerHTML = segments.map(seg => `
