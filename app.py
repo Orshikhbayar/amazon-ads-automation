@@ -115,24 +115,41 @@ except Exception as e:
     print(f"⚠️ Redis not available: {e}")
     rdb = None
 
-print("🔹 Loading FAISS index into RAM...")
+import requests, tempfile
+
+def load_index_from_url(url):
+    print(f"🌐 Downloading FAISS index from {url}")
+    r = requests.get(url)
+    r.raise_for_status()
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(r.content)
+        return faiss.read_index(f.name)
+
+def load_docs_from_url(url):
+    print(f"🌐 Downloading docs from {url}")
+    r = requests.get(url)
+    r.raise_for_status()
+    return [json.loads(line) for line in r.text.splitlines()]
+
+FAISS_URL = os.getenv("FAISS_URL")
+DOCS_URL = os.getenv("DOCS_URL")
+
+print("🔹 Loading FAISS + docs (local or remote)...")
 try:
-    index = faiss.read_index(INDEX_PATH)
-    index.nprobe = 10
-    docs = [json.loads(l) for l in open(DOCS_PATH, "r", encoding="utf-8")]
-    print(f"✅ Loaded {len(docs)} docs into memory")
+    if FAISS_URL and DOCS_URL:
+        index = load_index_from_url(FAISS_URL)
+        docs = load_docs_from_url(DOCS_URL)
+    else:
+        index = faiss.read_index(INDEX_PATH)
+        docs = [json.loads(l) for l in open(DOCS_PATH, "r", encoding="utf-8")]
+
+        index.nprobe = 10
+        print(f"✅ Loaded {len(docs)} docs into memory")
 except Exception as e:
     print(f"❌ Failed to load FAISS or docs: {e}")
     index, docs = None, []
 
-try:
-    rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    rdb.ping()
-    print(f"✅ Connected to Redis at {REDIS_URL}")
-except Exception as e:
-    print(f"⚠️ Redis not available: {e}")
-    rdb = None
-
+    
 # ---------------------------
 # 🔹 BM25 HYBRID RETRIEVER
 # ---------------------------
