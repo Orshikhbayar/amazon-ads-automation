@@ -1,0 +1,7 @@
+# Exclude local data from deployment
+Data/
+*.index
+*.jsonl
+*.csv
+*.npy
+*.pt
