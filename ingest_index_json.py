@@ -22,6 +22,12 @@ Outputs:
 import os, json, sys
 import numpy as np
 import faiss
+from dotenv import load_dotenv
+load_dotenv()
+
+print(f"🔍 EMBEDDING_BACKEND={os.getenv('EMBEDDING_BACKEND')}")
+print(f"🔍 EMBEDDING_MODEL={os.getenv('EMBEDDING_MODEL')}")
+
 from utils.embedding import get_embeddings_batch
 
 def _path(*parts):
@@ -29,7 +35,7 @@ def _path(*parts):
     p2 = os.path.join("Data", *parts)
     return p1 if os.path.exists(p1) or not os.path.exists(p2) else p2
 
-INPUT_JSON   = _path("docs_japan.json")
+INPUT_JSON   = _path("keyword_with_answer.json")
 OUTPUT_INDEX = _path("faiss2.index")
 OUTPUT_DOCS  = _path("docs2.jsonl")
 

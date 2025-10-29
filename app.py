@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, current_app
 from flask_cors import CORS
 import os
 import sys
 import json
 import subprocess
 import re
+import faiss
+import redis
+import numpy as np
+from dotenv import load_dotenv
+from rank_bm25 import BM25Okapi
+import re
+from _12 import retrieve_docs, generate_segments
 
 # ---------------------------
-# PATH HELPERS
+# ENV + PATH HELPERS
 # ---------------------------
+load_dotenv()  # load .env at startup
+
 def _path(*parts):
     p1 = os.path.join("data", *parts)
     p2 = os.path.join("Data", *parts)
@@ -78,23 +87,79 @@ def translate_keywords_to_japanese(keywords: list[str]) -> list[str]:
 # FLASK APP SETUP
 # ---------------------------
 app = Flask(__name__)
+CORS(app)
+
 @app.route("/")
 def index():
     return send_from_directory('public', 'index.html')
 
-CORS(app)
-
-# Check environment vars
+# ---------------------------
+# ENV CHECKS
+# ---------------------------
 required_env = ['OPENAI_API_KEY', 'EMBEDDING_BACKEND', 'EMBEDDING_MODEL']
 missing_env = [v for v in required_env if not os.getenv(v)]
 if missing_env:
     print(f"⚠️ Missing environment variables: {', '.join(missing_env)}")
 
 # ---------------------------
-# ROUTES
+# 🔹 FAISS + REDIS PRELOAD
+# ---------------------------
+INDEX_PATH = _path("faiss.index")
+DOCS_PATH = _path("docs.jsonl")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+try:
+    rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    rdb.ping()
+    print(f"✅ Connected to Redis at {REDIS_URL}")
+except Exception as e:
+    print(f"⚠️ Redis not available: {e}")
+    rdb = None
+
+print("🔹 Loading FAISS index into RAM...")
+try:
+    index = faiss.read_index(INDEX_PATH)
+    index.nprobe = 10
+    docs = [json.loads(l) for l in open(DOCS_PATH, "r", encoding="utf-8")]
+    print(f"✅ Loaded {len(docs)} docs into memory")
+except Exception as e:
+    print(f"❌ Failed to load FAISS or docs: {e}")
+    index, docs = None, []
+
+try:
+    rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    rdb.ping()
+    print(f"✅ Connected to Redis at {REDIS_URL}")
+except Exception as e:
+    print(f"⚠️ Redis not available: {e}")
+    rdb = None
+
+# ---------------------------
+# 🔹 BM25 HYBRID RETRIEVER
 # ---------------------------
 
 
+print("🔹 Building BM25 index...")
+try:
+    tokenized_corpus = [
+        re.findall(r"\w+", (d.get("text", "") + " " + d.get("keyword", "")).lower())
+        for d in docs
+    ]
+    bm25 = BM25Okapi(tokenized_corpus)
+    print(f"✅ BM25 index built ({len(tokenized_corpus)} docs)")
+except Exception as e:
+    print(f"⚠️ BM25 build failed: {e}")
+    bm25 = None
+
+
+# Attach to Flask app (global state)
+app.faiss_index = index
+app.bm25 = bm25
+app.docs = docs
+app.rdb = rdb
+
+# ---------------------------
+# ROUTES
+# ---------------------------
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -126,6 +191,44 @@ def retrieve_segments():
         if not campaign_brief:
             return jsonify({"error": "Campaign brief is required"}), 400
 
+        # ✅ Access preloaded FAISS, BM25, Redis
+        
+        index = current_app.faiss_index
+        docs = current_app.docs
+        bm25 = current_app.bm25
+        rdb = current_app.rdb
+
+        cache_key = f"retrieve:{campaign_brief}:{top_k}:{keyword_weight}"
+        if rdb and rdb.exists(cache_key):
+            print("⚡ Returning cached retrieval result")
+            return jsonify(json.loads(rdb.get(cache_key)))
+
+        # ----------------------------
+        # 🧠 BM25 fallback for short briefs
+        # ----------------------------
+        bm25_matches = []
+        if bm25 and len(campaign_brief.split()) < 5:
+            import re
+            from rank_bm25 import BM25Okapi
+
+            query_tokens = re.findall(r"\w+", campaign_brief.lower())
+            scores = bm25.get_scores(query_tokens)
+            top_bm25 = np.argsort(scores)[::-1][:top_k]
+            for idx in top_bm25:
+                bm25_matches.append({
+                    "name": docs[idx]["keyword"],
+                    "match_percent": round(scores[idx] * 100, 2)
+                })
+            if bm25_matches:
+                print("🔹 Used BM25 fallback")
+                result = {"segments": bm25_matches, "total_found": len(bm25_matches)}
+                if rdb:
+                    rdb.setex(cache_key, 300, json.dumps(result))
+                return jsonify(result)
+
+        # ----------------------------
+        # 🧩 FAISS retrieval (default)
+        # ----------------------------
         args = [
             "--brief", campaign_brief,
             "--top-k", str(top_k),
@@ -135,14 +238,30 @@ def retrieve_segments():
         if not enable_keywords:
             args.append("--no-extract")
 
-        code, out, err = run_12py(args)
-        if code != 0:
-            return jsonify({"error": err}), 500
+               # ----------------------------
+        # 🧩 FAISS retrieval (default)
+        # ----------------------------
+        segments = retrieve_docs(
+            campaign_brief,
+            top_k=top_k,
+            kw_weight=keyword_weight, 
+            index=current_app.faiss_index,
+            docs=current_app.docs,
+            rdb=current_app.rdb
+        )
 
-        segments = parse_retrieval_output(out)
-        return jsonify({"segments": segments, "total_found": len(segments)})
+        result = {"segments": segments, "total_found": len(segments)}
+        if rdb:
+            rdb.setex(cache_key, 300, json.dumps(result))
+
+        return jsonify(result)
+
+
+        
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # ---------------------------
 # GENERATE SEGMENTS
