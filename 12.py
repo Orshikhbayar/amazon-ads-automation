@@ -134,8 +134,9 @@ Given the campaign brief and related documents, identify 3–5 target audience s
 Brief:
 {brief}
 
-Documents:
-{docs_text}
+Documents (each has a segment name and text):
+{ "\n".join([f"{d['keyword']}: {d['text']}" for d in retrieved_docs]) }
+Please write audience segments using the same names (keywords) as shown above when possible.
 
 Format each segment as:
 **Segment N: <segment name>**
