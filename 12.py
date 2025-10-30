@@ -15,7 +15,7 @@ from flask import current_app
 from embedding import get_embeddings_batch
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
-
+from flask import has_app_context, current_app
 # ---------------------------
 # CONFIG
 # ---------------------------
@@ -43,14 +43,32 @@ def embed_text(text, cache_key=None, rdb=None):
 # ---------------------------
 def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index=None, docs=None, rdb=None):
     """Hybrid retrieval from FAISS + BM25."""
-    # Use Flask globals if not provided
-    index = index or getattr(current_app, "faiss_index", None)
-    docs = docs or getattr(current_app, "docs", None)
-    bm25 = getattr(current_app, "bm25", None)
-    rdb = rdb or getattr(current_app, "rdb", None)
+
+    # Safely check if Flask context is active
+    if has_app_context():
+        index = index or getattr(current_app, "faiss_index", None)
+        docs = docs or getattr(current_app, "docs", None)
+        bm25 = getattr(current_app, "bm25", None)
+        rdb = rdb or getattr(current_app, "rdb", None)
+    else:
+        # Fallback: manually load from app if running standalone (Vercel subprocess)
+        try:
+            from app import app
+            with app.app_context():
+                index = index or getattr(app, "faiss_index", None)
+                docs = docs or getattr(app, "docs", None)
+                bm25 = getattr(app, "bm25", None)
+                rdb = rdb or getattr(app, "rdb", None)
+        except Exception as e:
+            print(f"⚠️ Context load failed: {e}")
 
     if not index or not docs:
-        raise RuntimeError("❌ FAISS index or docs not loaded in app context")
+        raise RuntimeError("❌ FAISS index or docs not loaded in app context or fallback")
+
+    cache_key = f"embed:{brief}"
+    q_emb = embed_text(brief, cache_key, rdb)
+    ...
+
 
     cache_key = f"embed:{brief}"
     q_emb = embed_text(brief, cache_key, rdb)
