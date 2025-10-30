@@ -146,8 +146,26 @@ def generate_segments(brief, retrieved_docs, rdb=None):
 
     prompt = f"""
 あなたは日本のAmazonマーケティング戦略担当者です。
-以下のキャンペーン概要と関連する商品情報をもとに、3〜5個のターゲットオーディエンスセグメントをJSON形式で出力してください。
-出力は必ず日本語で記述してください。
+以下のキャンペーン概要と関連情報をもとに、3〜5個のターゲットオーディエンスセグメントを提案してください。
+出力は必ず **日本語** で、次のフォーマットに従ってください：
+
+[
+  {{
+    "name": "セグメント名",
+    "reason": "なぜこのセグメントがキャンペーンに適しているか（1〜2文）",
+    "keywords": ["キーワード1", "キーワード2", "キーワード3"],
+    "headlines": ["広告見出し1", "広告見出し2"],
+    "description": "ターゲット層や商品特徴を踏まえた詳細説明（2〜3文）"
+  }}
+]
+
+条件:
+- 40〜50代のアウトドア好き、運動好き、キャンプギアに興味のある層を想定
+- Amazon Japanのカテゴリトーンで自然に書く
+- 各項目を必ず埋める（空欄禁止）
+- 「最適」「豊富に揃う」などの単調な語を避ける
+- 広告文らしい簡潔なヘッドラインにする
+- セグメント名は「スポーツ＆アウトドア > アウトドア」のような階層表記も可
 
 【キャンペーン概要】
 {brief}
@@ -155,17 +173,7 @@ def generate_segments(brief, retrieved_docs, rdb=None):
 【関連ドキュメント】
 {docs_text}
 
-出力フォーマット（必ずJSON配列で出力してください）:
-[
-  {{
-    "name": "セグメント名",
-    "reason": "なぜこのセグメントが適しているのか（1〜2文）",
-    "keywords": ["キーワード1", "キーワード2", "キーワード3"],
-    "headlines": ["見出し1", "見出し2"],
-    "description": "セグメントの詳細説明（2〜3文）"
-  }}
-]
-"""
+JSON形式で出力してください："""
 
     try:
         resp = client.chat.completions.create(
@@ -174,7 +182,7 @@ def generate_segments(brief, retrieved_docs, rdb=None):
                 {"role": "system", "content": "あなたは日本のAmazonマーケティング専門家です。必ず有効なJSON形式で応答してください。マークダウンや説明文は含めないでください。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.5,
+            temperature=0.4,
             max_completion_tokens=800,
         )
 
