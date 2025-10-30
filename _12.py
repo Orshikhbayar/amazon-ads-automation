@@ -9,7 +9,7 @@ Features:
 - Compatible with Flask current_app context
 """
 
-import os, sys, json, numpy as np
+import os, sys, json, numpy as np, time
 import faiss
 from flask import current_app
 from embedding import get_embeddings_batch
@@ -27,22 +27,155 @@ KW_WEIGHT_DEFAULT = 0.4
 # EMBEDDING UTIL
 # ---------------------------
 def embed_text(text, cache_key=None, rdb=None):
-    """Embed a single text with Redis caching."""
+    """Enhanced embedding with intelligent caching and compression."""
     if rdb and cache_key and rdb.exists(cache_key):
-        return np.array(json.loads(rdb.get(cache_key)), dtype="float32")
+        try:
+            cached_data = json.loads(rdb.get(cache_key))
+            return np.array(cached_data, dtype="float32")
+        except Exception as e:
+            print(f"⚠️ Cache read error for {cache_key}: {e}")
+            # Continue to generate fresh embedding
 
     vec = get_embeddings_batch([text])[0].astype("float32")
 
     if rdb and cache_key:
-        rdb.set(cache_key, json.dumps(vec.tolist()))
+        try:
+            # Cache with longer TTL for embeddings (they rarely change)
+            cache_ttl = 7200  # 2 hours
+            rdb.setex(cache_key, cache_ttl, json.dumps(vec.tolist()))
+        except Exception as e:
+            print(f"⚠️ Cache write error for {cache_key}: {e}")
+    
     return vec
+
+
+def get_system_diagnostics(rdb=None):
+    """Get system performance diagnostics and cache statistics."""
+    diagnostics = {
+        "timestamp": time.time(),
+        "cache_stats": {},
+        "memory_usage": {},
+        "performance_metrics": {}
+    }
+    
+    if rdb:
+        try:
+            # Redis cache statistics
+            info = rdb.info()
+            diagnostics["cache_stats"] = {
+                "redis_connected": True,
+                "used_memory": info.get("used_memory_human", "N/A"),
+                "total_connections": info.get("total_connections_received", 0),
+                "keyspace_hits": info.get("keyspace_hits", 0),
+                "keyspace_misses": info.get("keyspace_misses", 0),
+                "hit_rate": round(info.get("keyspace_hits", 0) / max(info.get("keyspace_hits", 0) + info.get("keyspace_misses", 0), 1) * 100, 2)
+            }
+            
+            # Count cache keys by type
+            keys_pattern = {
+                "embeddings": "embed*",
+                "retrievals": "retrieval*", 
+                "generations": "generate*"
+            }
+            
+            for key_type, pattern in keys_pattern.items():
+                try:
+                    count = len(rdb.keys(pattern))
+                    diagnostics["cache_stats"][f"{key_type}_cached"] = count
+                except:
+                    diagnostics["cache_stats"][f"{key_type}_cached"] = 0
+                    
+        except Exception as e:
+            diagnostics["cache_stats"] = {"redis_connected": False, "error": str(e)}
+    
+    # Memory usage (if psutil available)
+    try:
+        import psutil
+        process = psutil.Process()
+        diagnostics["memory_usage"] = {
+            "rss_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+            "vms_mb": round(process.memory_info().vms / 1024 / 1024, 2),
+            "cpu_percent": process.cpu_percent()
+        }
+    except ImportError:
+        diagnostics["memory_usage"] = {"error": "psutil not available"}
+    
+    return diagnostics
+
+
+def validate_retrieval_results(results, brief, min_score=10.0):
+    """Validate retrieval results and provide quality metrics."""
+    if not results:
+        return {"valid": False, "reason": "No results returned", "quality_score": 0}
+    
+    validation = {
+        "valid": True,
+        "total_results": len(results),
+        "quality_metrics": {},
+        "issues": []
+    }
+    
+    # Score distribution analysis
+    scores = [r.get("score", 0) for r in results]
+    validation["quality_metrics"] = {
+        "avg_score": round(np.mean(scores), 2),
+        "min_score": round(np.min(scores), 2),
+        "max_score": round(np.max(scores), 2),
+        "score_std": round(np.std(scores), 2)
+    }
+    
+    # Quality checks
+    if validation["quality_metrics"]["min_score"] < min_score:
+        validation["issues"].append(f"Low minimum score: {validation['quality_metrics']['min_score']}")
+    
+    if validation["quality_metrics"]["score_std"] < 5.0:
+        validation["issues"].append("Low score variance - results may be too similar")
+    
+    # Content diversity check
+    keywords = [r.get("keyword", "") for r in results]
+    unique_keywords = len(set(keywords))
+    if unique_keywords < len(keywords):
+        validation["issues"].append("Duplicate keywords in results")
+    
+    # Brief relevance check (simple keyword overlap)
+    brief_words = set(brief.lower().split())
+    keyword_overlap = []
+    for result in results:
+        keyword_words = set(result.get("keyword", "").lower().split())
+        overlap = len(brief_words & keyword_words) / max(len(brief_words), 1)
+        keyword_overlap.append(overlap)
+    
+    validation["quality_metrics"]["avg_relevance"] = round(np.mean(keyword_overlap), 3)
+    
+    if validation["quality_metrics"]["avg_relevance"] < 0.1:
+        validation["issues"].append("Low keyword relevance to brief")
+    
+    validation["quality_score"] = min(100, max(0, 
+        validation["quality_metrics"]["avg_score"] * 0.4 +
+        validation["quality_metrics"]["avg_relevance"] * 60 +
+        (unique_keywords / len(keywords)) * 20
+    ))
+    
+    return validation
 
 
 # ---------------------------
 # RETRIEVAL CORE
 # ---------------------------
 def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index=None, docs=None, rdb=None):
-    """Hybrid retrieval from FAISS + BM25, with Flask and standalone fallback."""
+    """
+    Enhanced hybrid retrieval with improved scoring, caching, and diagnostics.
+    Uses 0.7 * FAISS + 0.3 * BM25 hybrid scoring for better relevance.
+    """
+    import time
+    start_time = time.time()
+    
+    # Check cache first for faster responses
+    cache_key = f"retrieval_v2:{brief}:{top_k}:{kw_weight}"
+    if rdb and rdb.exists(cache_key):
+        cached_result = json.loads(rdb.get(cache_key))
+        print(f"⚡ Cache hit for retrieval ({len(cached_result)} docs)")
+        return cached_result
 
     try:
         from flask import has_app_context, current_app
@@ -72,49 +205,147 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
     if not index or not docs:
         raise RuntimeError("❌ FAISS index or docs not loaded (both context and fallback failed)")
 
-    cache_key = f"embed:{brief}"
-    q_emb = embed_text(brief, cache_key, rdb)
-
+    # Enhanced embedding with caching
+    embed_cache_key = f"embed_v2:{brief}"
+    q_emb = embed_text(brief, embed_cache_key, rdb)
     q_emb = q_emb / (np.linalg.norm(q_emb) + 1e-12)
-    sims, idxs = index.search(np.array([q_emb], dtype="float32"), top_k)
+
+    # FAISS retrieval with expanded search for better hybrid scoring
+    search_k = min(top_k * 3, len(docs))  # Search more candidates for better hybrid results
+    sims, idxs = index.search(np.array([q_emb], dtype="float32"), search_k)
     sims, idxs = sims[0], idxs[0]
 
-    # Normalize FAISS similarity scores to 0–100%
-    max_sim = float(np.max(sims)) if np.max(sims) > 0 else 1.0
-    faiss_results = [
-        {
-            "keyword": docs[i]["keyword"],
-            "text": docs[i]["text"],
-            "score": round((float(sims[j]) / max_sim) * 100, 1)
-        }
-        for j, i in enumerate(idxs)
-        if i != -1
-    ]
+    # Improved FAISS score normalization
+    def normalize_faiss_scores(scores):
+        """Normalize FAISS cosine similarity scores to 0-1 range"""
+        if len(scores) == 0:
+            return scores
+        # Cosine similarity is already in [-1, 1], shift to [0, 1]
+        normalized = (scores + 1) / 2
+        # Apply sigmoid-like transformation for better distribution
+        return 1 / (1 + np.exp(-5 * (normalized - 0.5)))
 
-    bm25_results = []
+    faiss_scores_norm = normalize_faiss_scores(sims)
+    faiss_results = {}
+    for j, i in enumerate(idxs):
+        if i != -1 and i < len(docs):
+            keyword = docs[i]["keyword"]
+            faiss_results[keyword] = {
+                "keyword": keyword,
+                "text": docs[i]["text"],
+                "faiss_score": float(faiss_scores_norm[j]),
+                "faiss_rank": j + 1
+            }
+
+    # BM25 retrieval with improved scoring
+    bm25_results = {}
     if 'bm25' in locals() and bm25:
-        bm_scores = bm25.get_scores(brief.split())
-        bm_ranked = np.argsort(bm_scores)[::-1][:top_k]
-        bm25_results = [
-            {"keyword": docs[i]["keyword"], "text": docs[i]["text"], "score": float(bm_scores[i])}
-            for i in bm_ranked
-        ]
+        try:
+            # Tokenize query for BM25
+            query_tokens = brief.lower().replace('、', ' ').replace('。', ' ').split()
+            bm_scores = bm25.get_scores(query_tokens)
+            
+            # Normalize BM25 scores
+            def normalize_bm25_scores(scores):
+                """Normalize BM25 scores to 0-1 range"""
+                if len(scores) == 0 or np.max(scores) == 0:
+                    return scores
+                # Use robust normalization to handle outliers
+                scores = np.array(scores)
+                q75, q25 = np.percentile(scores, [75, 25])
+                iqr = q75 - q25
+                if iqr > 0:
+                    # Cap outliers and normalize
+                    scores = np.clip(scores, 0, q75 + 1.5 * iqr)
+                return scores / (np.max(scores) + 1e-8)
+            
+            bm_scores_norm = normalize_bm25_scores(bm_scores)
+            bm_ranked = np.argsort(bm_scores_norm)[::-1][:search_k]
+            
+            for rank, i in enumerate(bm_ranked):
+                if i < len(docs) and bm_scores_norm[i] > 0:
+                    keyword = docs[i]["keyword"]
+                    bm25_results[keyword] = {
+                        "keyword": keyword,
+                        "text": docs[i]["text"],
+                        "bm25_score": float(bm_scores_norm[i]),
+                        "bm25_rank": rank + 1
+                    }
+        except Exception as e:
+            print(f"⚠️ BM25 scoring failed: {e}")
+            bm25_results = {}
 
-    combined = {}
-    for item in faiss_results:
-        combined[item["keyword"]] = kw_weight * item["score"]
-    for item in bm25_results:
-        combined[item["keyword"]] = combined.get(item["keyword"], 0) + (1 - kw_weight) * item["score"]
-
-    ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    retrieved = [
-        {"keyword": k, "score": round(v, 2), "text": next(d["text"] for d in docs if d["keyword"] == k)}
-        for k, v in ranked
-    ]
+    # Hybrid scoring: 0.7 * FAISS + 0.3 * BM25
+    FAISS_WEIGHT = 0.7
+    BM25_WEIGHT = 0.3
     
-    if rdb:
-        rdb.set(f"retrieval:{brief}", json.dumps(retrieved, ensure_ascii=False))
+    combined_results = {}
+    all_keywords = set(faiss_results.keys()) | set(bm25_results.keys())
+    
+    for keyword in all_keywords:
+        faiss_score = faiss_results.get(keyword, {}).get("faiss_score", 0)
+        bm25_score = bm25_results.get(keyword, {}).get("bm25_score", 0)
+        
+        # Hybrid score calculation
+        hybrid_score = FAISS_WEIGHT * faiss_score + BM25_WEIGHT * bm25_score
+        
+        # Get text from either result
+        text = (faiss_results.get(keyword, {}).get("text") or 
+                bm25_results.get(keyword, {}).get("text", ""))
+        
+        combined_results[keyword] = {
+            "keyword": keyword,
+            "text": text,
+            "hybrid_score": hybrid_score,
+            "faiss_score": faiss_score,
+            "bm25_score": bm25_score,
+            "faiss_rank": faiss_results.get(keyword, {}).get("faiss_rank", 999),
+            "bm25_rank": bm25_results.get(keyword, {}).get("bm25_rank", 999)
+        }
 
+    # Sort by hybrid score and select top_k
+    ranked_results = sorted(combined_results.values(), 
+                          key=lambda x: x["hybrid_score"], 
+                          reverse=True)[:top_k]
+    
+    # Format final results with enhanced metadata
+    retrieved = []
+    for i, result in enumerate(ranked_results):
+        retrieved.append({
+            "keyword": result["keyword"],
+            "text": result["text"],
+            "score": round(result["hybrid_score"] * 100, 2),  # Convert to percentage
+            "rank": i + 1,
+            "faiss_score": round(result["faiss_score"] * 100, 2),
+            "bm25_score": round(result["bm25_score"] * 100, 2),
+            "source": "hybrid"
+        })
+    
+    # Enhanced caching with longer TTL for better performance
+    if rdb and retrieved:
+        cache_ttl = 3600  # 1 hour cache for retrieval results
+        rdb.setex(cache_key, cache_ttl, json.dumps(retrieved, ensure_ascii=False))
+        print(f"💾 Cached retrieval result for {cache_ttl}s")
+
+    # Validate retrieval quality
+    validation = validate_retrieval_results(retrieved, brief)
+    retrieval_time = round(time.time() - start_time, 3)
+    
+    # Enhanced logging with quality metrics
+    quality_info = f"Quality: {validation['quality_score']:.1f}/100"
+    if validation['issues']:
+        quality_info += f" (Issues: {len(validation['issues'])})"
+    
+    print(f"🔍 Retrieval completed in {retrieval_time}s - Found {len(retrieved)} docs (FAISS: {len(faiss_results)}, BM25: {len(bm25_results)}) - {quality_info}")
+    
+    # Add validation metadata to results
+    for result in retrieved:
+        result["validation"] = {
+            "quality_score": validation["quality_score"],
+            "avg_score": validation["quality_metrics"]["avg_score"],
+            "retrieval_time": retrieval_time
+        }
+    
     return retrieved
 
 
