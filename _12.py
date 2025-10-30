@@ -144,38 +144,46 @@ def generate_segments(brief, retrieved_docs, rdb=None):
         for d in retrieved_docs
     ])
 
-    prompt = f"""
-次のキャンペーン概要と既存のセグメント情報を参考に、
-それぞれのセグメント名（【セグメント名】で示されている部分）を
-そのまま使用して、日本語で「適合理由」「キーワード」「見出し」「説明」を生成してください。
+    prompt = f"""以下のキャンペーン概要と参照セグメント情報を基に、日本のAmazon広告に最適なターゲットセグメントを日本語で生成してください。
 
-出力は以下のJSONフォーマットで返してください:
+**重要：必ず以下のJSON形式で出力してください。マークダウンや説明文は含めず、純粋なJSONのみを返してください。**
+
+出力形式:
 [
   {{
-    "segment_name": "〇〇〇",
-    "reason": "～",
-    "keywords": ["～", "～"],
-    "headings": ["～", "～"],
-    "description": "～"
+    "name": "セグメント名（日本語）",
+    "reason": "このセグメントがキャンペーンに適している理由（日本語で詳しく）",
+    "keywords": ["キーワード1", "キーワード2", "キーワード3"],
+    "headlines": ["魅力的な見出し1", "魅力的な見出し2"],
+    "description": "セグメントの詳細な説明（日本語）"
   }}
 ]
+
+**要件:**
+- 各セグメントの「name」は参照セグメントの【セグメント名】を使用
+- 「reason」は50文字以上で具体的に
+- 「keywords」は3〜5個の日本語キーワード
+- 「headlines」は2〜3個の魅力的な日本語見出し（20文字以内）
+- 「description」は80文字以上の詳細な日本語説明
+- 出力は必ず有効なJSON配列形式
 
 キャンペーン概要:
 {brief}
 
 参照セグメント:
 {docs_text}
-"""
+
+**JSON形式のみ出力してください:**"""
 
     try:
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "あなたは日本のAmazonマーケティング専門家です。"},
+                {"role": "system", "content": "あなたは日本のAmazonマーケティング専門家です。必ず有効なJSON形式で応答してください。マークダウンや説明文は含めないでください。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.5,
-            max_completion_tokens=700,
+            max_completion_tokens=800,
         )
 
         text = resp.choices[0].message.content.strip()
@@ -183,14 +191,40 @@ def generate_segments(brief, retrieved_docs, rdb=None):
         # Strip markdown code fences if present
         if text.startswith("```"):
             lines = text.split("\n")
+            # Remove first line (```json or ```) and last line (```)
             text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
             text = text.strip()
         
         try:
             parsed = json.loads(text)
+            # Validate structure
+            if not isinstance(parsed, list):
+                raise ValueError("Response must be a JSON array")
+            
+            # Ensure all required fields exist
+            for segment in parsed:
+                if "name" not in segment:
+                    segment["name"] = "Unnamed Segment"
+                if "reason" not in segment:
+                    segment["reason"] = "No description"
+                if "keywords" not in segment:
+                    segment["keywords"] = []
+                if "headlines" not in segment:
+                    segment["headlines"] = []
+                if "description" not in segment:
+                    segment["description"] = segment.get("reason", "No description")
+                    
         except Exception as e:
             print(f"⚠️ Could not parse JSON: {e}")
-            parsed = [{"segment_name": "未解析出力", "description": text}]
+            print(f"Raw response: {text[:200]}...")
+            # Return structured fallback
+            parsed = [{
+                "name": "Unnamed Segment",
+                "reason": "No description",
+                "keywords": [],
+                "headlines": [],
+                "description": text[:500]
+            }]
 
         if rdb:
             rdb.setex(cache_key, 600, json.dumps(parsed, ensure_ascii=False))
