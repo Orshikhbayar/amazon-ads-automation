@@ -144,36 +144,28 @@ def generate_segments(brief, retrieved_docs, rdb=None):
         for d in retrieved_docs
     ])
 
-    prompt = f"""以下のキャンペーン概要と参照セグメント情報を基に、日本のAmazon広告に最適なターゲットセグメントを日本語で生成してください。
+    prompt = f"""
+あなたは日本のAmazonマーケティング戦略担当者です。
+以下のキャンペーン概要と関連する商品情報をもとに、3〜5個のターゲットオーディエンスセグメントをJSON形式で出力してください。
+出力は必ず日本語で記述してください。
 
-**重要：必ず以下のJSON形式で出力してください。マークダウンや説明文は含めず、純粋なJSONのみを返してください。**
-
-出力形式:
-[
-  {{
-    "name": "セグメント名（日本語）",
-    "reason": "このセグメントがキャンペーンに適している理由（日本語で詳しく）",
-    "keywords": ["キーワード1", "キーワード2", "キーワード3"],
-    "headlines": ["魅力的な見出し1", "魅力的な見出し2"],
-    "description": "セグメントの詳細な説明（日本語）"
-  }}
-]
-
-**要件:**
-- 各セグメントの「name」は参照セグメントの【セグメント名】を使用
-- 「reason」は50文字以上で具体的に
-- 「keywords」は3〜5個の日本語キーワード
-- 「headlines」は2〜3個の魅力的な日本語見出し（20文字以内）
-- 「description」は80文字以上の詳細な日本語説明
-- 出力は必ず有効なJSON配列形式
-
-キャンペーン概要:
+【キャンペーン概要】
 {brief}
 
-参照セグメント:
+【関連ドキュメント】
 {docs_text}
 
-**JSON形式のみ出力してください:**"""
+出力フォーマット（必ずJSON配列で出力してください）:
+[
+  {{
+    "name": "セグメント名",
+    "reason": "なぜこのセグメントが適しているのか（1〜2文）",
+    "keywords": ["キーワード1", "キーワード2", "キーワード3"],
+    "headlines": ["見出し1", "見出し2"],
+    "description": "セグメントの詳細説明（2〜3文）"
+  }}
+]
+"""
 
     try:
         resp = client.chat.completions.create(
@@ -200,6 +192,11 @@ def generate_segments(brief, retrieved_docs, rdb=None):
             # Validate structure
             if not isinstance(parsed, list):
                 raise ValueError("Response must be a JSON array")
+            
+            # Fallback: fill reason if missing
+            for seg in parsed:
+                if not seg.get("reason") and seg.get("description"):
+                    seg["reason"] = seg["description"].split("。")[0] + "。"
             
             # Ensure all required fields exist
             for segment in parsed:
