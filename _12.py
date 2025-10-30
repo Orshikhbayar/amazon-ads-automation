@@ -475,11 +475,13 @@ def generate_segments(brief, retrieved_docs, rdb=None):
 あなたは日本のAmazonマーケティング戦略担当者です。
 以下のキャンペーン概要と関連商品情報をもとに、4〜5個のターゲットオーディエンスセグメントを提案してください。
 
+**重要：各セグメントには必ず「適合理由（reason）」フィールドを含めてください。なぜこのセグメントがキャンペーンに合うのかを1〜2文の自然な日本語で説明してください。**
+
 **出力形式（必ずこの構造のJSON配列で出力）:**
 [
   {{
     "name": "セグメント名",
-    "reason": "なぜこのセグメントがキャンペーンに適しているか（1〜2文）",
+    "reason": "なぜこのセグメントがキャンペーンに適しているか（1〜2文の具体的な理由）",
     "keywords": ["キーワード1", "キーワード2", "キーワード3"],
     "headlines": ["広告見出し1", "広告見出し2"],
     "description": "ターゲット層や商品特徴を踏まえた詳細説明（2〜3文）"
@@ -492,6 +494,7 @@ def generate_segments(brief, retrieved_docs, rdb=None):
 - 背景: {config['context']}
 
 **品質要件:**
+- **適合理由（reason）は必須**: キャンペーンとの関連性を具体的に説明
 - Amazon Japanの自然で親しみやすいトーンで記述
 - 各フィールドを必ず埋める（空欄・「説明がありません」等は禁止）
 - 「最適」「豊富に揃う」「充実した」等の陳腐な表現を避ける
@@ -534,11 +537,12 @@ def generate_segments(brief, retrieved_docs, rdb=None):
             if not isinstance(parsed, list):
                 raise ValueError("Response must be a JSON array")
             
-            # Strict validation with automatic re-prompt if needed
+            # Enhanced validation with specific focus on reason field
             def validate_and_fix_segments(segments):
-                """Strict validation with automatic re-prompt for incomplete segments."""
+                """Strict validation with automatic re-prompt for incomplete segments, especially reason field."""
                 required_fields = ["name", "reason", "keywords", "headlines", "description"]
                 needs_reprompt = False
+                reason_missing = False
                 
                 for i, segment in enumerate(segments):
                     # Check for required fields and empty content
@@ -546,22 +550,45 @@ def generate_segments(brief, retrieved_docs, rdb=None):
                         if field not in segment or not segment[field] or segment[field] == "（未入力）":
                             segment[field] = "（未入力）"
                             needs_reprompt = True
+                            if field == "reason":
+                                reason_missing = True
+                    
+                    # Special validation for reason field
+                    if "reason" in segment:
+                        reason_text = str(segment["reason"]).strip()
+                        if (len(reason_text) < 5 or 
+                            any(phrase in reason_text for phrase in ["説明がありません", "No description", "未入力", "（未入力）", "説明"])):
+                            needs_reprompt = True
+                            reason_missing = True
                     
                     # Check for placeholder text that indicates incomplete generation
                     problematic_phrases = ["説明がありません", "No description", "未入力", "（未入力）"]
                     for field in ["reason", "description"]:
                         if field in segment and any(phrase in str(segment[field]) for phrase in problematic_phrases):
                             needs_reprompt = True
+                            if field == "reason":
+                                reason_missing = True
                 
-                return segments, needs_reprompt
+                return segments, needs_reprompt, reason_missing
             
             # Enhanced validation and quality assurance
-            parsed, needs_reprompt = validate_and_fix_segments(parsed)
+            parsed, needs_reprompt, reason_missing = validate_and_fix_segments(parsed)
             
             # Automatic re-prompt if validation fails
             if needs_reprompt:
-                print("🔄 Incomplete generation detected, re-prompting...")
-                reprompt = f"""上記のJSONを完全に埋め直してください。空欄を残さず、日本語で自然に書いてください。
+                if reason_missing:
+                    print("🔄 Missing reason fields detected, re-prompting...")
+                    reprompt = f"""上記JSONに「適合理由」フィールドが欠けています。全てのセグメントに1〜2文の自然な理由を追記してください。
+
+キャンペーン概要: {brief}
+
+各セグメントの「reason」フィールドに、なぜそのセグメントがこのキャンペーンに適しているかを具体的に説明してください。
+例：「このセグメントは{brief}に関心の高い層で、商品の特徴と購買ニーズが一致するため。」
+
+完全なJSON形式で出力してください："""
+                else:
+                    print("🔄 Incomplete generation detected, re-prompting...")
+                    reprompt = f"""上記のJSONを完全に埋め直してください。空欄を残さず、日本語で自然に書いてください。
 
 以下の形式で必ず全てのフィールドを埋めてください：
 [
@@ -611,8 +638,12 @@ JSON形式のみで出力してください："""
                 if "name" not in segment or not segment["name"].strip():
                     segment["name"] = f"セグメント{i+1}"
                 
-                if "reason" not in segment or not segment["reason"].strip():
-                    segment["reason"] = "このセグメントは対象キャンペーンに適しています。"
+                # Enhanced reason field fallback processing
+                if "reason" not in segment or not segment["reason"].strip() or "説明" in segment.get("reason", ""):
+                    segment["reason"] = (
+                        f"{brief} に関連するターゲット層に最も適した理由を説明します。"
+                        "このセグメントは商品の特徴と購買意欲に一致しています。"
+                    )
                 
                 if "keywords" not in segment or not isinstance(segment["keywords"], list) or len(segment["keywords"]) == 0:
                     brief_words = brief.replace('、', ' ').replace('。', ' ').split()
@@ -646,6 +677,20 @@ JSON形式のみで出力してください："""
                 # Ensure headlines are within character limit
                 if "headlines" in segment:
                     segment["headlines"] = [h[:20] for h in segment["headlines"][:2]]
+            
+            # Final validation assertion for reason field
+            try:
+                assert all("reason" in seg and len(str(seg["reason"]).strip()) > 5 for seg in parsed), "All segments must have valid reason fields"
+                print("✅ Reason field validation passed")
+            except AssertionError as e:
+                print(f"⚠️ Reason field validation failed: {e}")
+                # Apply emergency fallback for any remaining invalid reasons
+                for seg in parsed:
+                    if "reason" not in seg or len(str(seg["reason"]).strip()) <= 5:
+                        seg["reason"] = (
+                            f"{brief} に関連するターゲット層に最も適した理由を説明します。"
+                            "このセグメントは商品の特徴と購買意欲に一致しています。"
+                        )
                     
         except Exception as e:
             print(f"⚠️ Could not parse JSON: {e}")
