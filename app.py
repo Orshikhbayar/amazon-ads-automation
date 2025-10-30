@@ -377,8 +377,131 @@ def parse_generated_segments(md_text, brief=""):
     return segs
 
 # ---------------------------
+# DEBUG & HEALTH ENDPOINTS
+# ---------------------------
+
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for monitoring and CI/CD."""
+    try:
+        # Check FAISS index
+        faiss_loaded = hasattr(current_app, 'faiss_index') and current_app.faiss_index is not None
+        
+        # Check Redis connection
+        redis_connected = False
+        if hasattr(current_app, 'rdb') and current_app.rdb:
+            try:
+                current_app.rdb.ping()
+                redis_connected = True
+            except:
+                pass
+        
+        # Check docs loaded
+        docs_loaded = hasattr(current_app, 'docs') and current_app.docs is not None
+        
+        # Check BM25 index
+        bm25_loaded = hasattr(current_app, 'bm25') and current_app.bm25 is not None
+        
+        status = {
+            "status": "ok" if all([faiss_loaded, redis_connected, docs_loaded]) else "degraded",
+            "faiss_loaded": faiss_loaded,
+            "redis_connected": redis_connected,
+            "docs_loaded": docs_loaded,
+            "bm25_loaded": bm25_loaded,
+            "docs_count": len(current_app.docs) if docs_loaded else 0,
+            "timestamp": time.time()
+        }
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time()
+        }), 500
+
+
+@app.route("/api/test", methods=["GET"])
+def test_generation():
+    """Static test endpoint for CI/smoke testing."""
+    try:
+        # Static test data
+        test_brief = "テスト用キャンペーン"
+        test_segments = [
+            {
+                "name": "テスト > サンプルセグメント",
+                "reason": "これはテスト用のセグメントです。",
+                "keywords": ["テスト", "サンプル", "デモ"],
+                "headlines": ["テスト用見出し1", "テスト用見出し2"],
+                "description": "システムの動作確認用のテストセグメントです。全ての機能が正常に動作していることを確認できます。"
+            }
+        ]
+        
+        return jsonify({
+            "status": "test_ok",
+            "campaign_brief": test_brief,
+            "generated_segments": test_segments,
+            "test_timestamp": time.time(),
+            "message": "Test endpoint working correctly"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "test_error", 
+            "error": str(e),
+            "timestamp": time.time()
+        }), 500
+
+
+@app.route("/api/retrieve", methods=["POST"])
+def retrieve_only():
+    """Enhanced retrieve endpoint with debug information."""
+    try:
+        data = request.get_json(force=True)
+        campaign_brief = data.get("campaign_brief", "").strip()
+        top_k = int(data.get("top_k", 3))
+        debug = data.get("debug", False)
+        
+        if not campaign_brief:
+            return jsonify({"error": "Campaign brief is required"}), 400
+        
+        from _12 import retrieve_docs
+        
+        retrieved = retrieve_docs(
+            campaign_brief,
+            top_k=top_k,
+            index=current_app.faiss_index,
+            docs=current_app.docs,
+            rdb=current_app.rdb
+        )
+        
+        response = {
+            "campaign_brief": campaign_brief,
+            "retrieved_segments": retrieved,
+            "total_found": len(retrieved)
+        }
+        
+        # Add debug information if requested
+        if debug:
+            response["debug_info"] = {
+                "faiss_scores": [r.get("faiss_score", 0) for r in retrieved],
+                "bm25_scores": [r.get("bm25_score", 0) for r in retrieved],
+                "matched_keywords": [r.get("keyword", "") for r in retrieved],
+                "domain_boosts": [r.get("domain_boost", 1.0) for r in retrieved],
+                "quality_score": retrieved[0].get("validation", {}).get("quality_score", 0) if retrieved else 0
+            }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        return jsonify({"error": f"Retrieval failed: {str(e)}"}), 500
+
+
+# ---------------------------
 # MAIN
 # ---------------------------
 if __name__ == "__main__":
+    import time
     print("🚀 Starting Flask server...")
     app.run(host="0.0.0.0", port=5000, debug=True)

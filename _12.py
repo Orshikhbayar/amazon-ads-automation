@@ -22,6 +22,24 @@ from flask import has_app_context, current_app
 TOP_K_DEFAULT = 5
 KW_WEIGHT_DEFAULT = 0.4
 
+# Domain-specific keyword heuristics for boosting relevance
+DOMAIN_KEYWORDS = {
+    'skincare': ['スキンケア', '美容液', '化粧水', '乳液', 'クリーム', '洗顔', 'パック', 'マスク', '保湿', 'アンチエイジング'],
+    'outdoor': ['アウトドア', 'キャンプ', 'ハイキング', '登山', 'テント', 'バックパック', 'シュラフ', 'ランタン', 'コンロ', 'アウトドアウェア'],
+    'electronics': ['スマートフォン', 'パソコン', 'タブレット', 'イヤホン', 'スピーカー', 'カメラ', 'ゲーム', 'テレビ', 'プリンター', 'ガジェット'],
+    'fitness': ['フィットネス', 'トレーニング', 'ダンベル', 'ヨガ', 'ランニング', 'プロテイン', 'サプリメント', 'ウェア', 'シューズ', 'マット'],
+    'home': ['ホーム', 'インテリア', 'キッチン', '掃除', '収納', '家具', '照明', 'カーテン', 'ラグ', '寝具'],
+    'fashion': ['ファッション', '服', 'シャツ', 'パンツ', 'ドレス', 'バッグ', '靴', 'アクセサリー', '時計', 'ジュエリー']
+}
+
+def normalize(v):
+    """Normalize vector to 0-1 range with numerical stability."""
+    v = np.array(v)
+    min_v, max_v = np.min(v), np.max(v)
+    if max_v - min_v < 1e-8:
+        return np.ones_like(v) * 0.5  # Return middle value if all same
+    return (v - min_v) / (max_v - min_v + 1e-8)
+
 
 # ---------------------------
 # EMBEDDING UTIL
@@ -215,17 +233,39 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
     sims, idxs = index.search(np.array([q_emb], dtype="float32"), search_k)
     sims, idxs = sims[0], idxs[0]
 
-    # Improved FAISS score normalization
-    def normalize_faiss_scores(scores):
-        """Normalize FAISS cosine similarity scores to 0-1 range"""
-        if len(scores) == 0:
-            return scores
-        # Cosine similarity is already in [-1, 1], shift to [0, 1]
-        normalized = (scores + 1) / 2
-        # Apply sigmoid-like transformation for better distribution
-        return 1 / (1 + np.exp(-5 * (normalized - 0.5)))
+    # Enhanced FAISS score normalization with domain boost
+    def detect_domain_and_boost(brief, results):
+        """Detect domain and apply keyword-based boosting."""
+        brief_lower = brief.lower()
+        detected_domains = []
+        
+        # Detect relevant domains
+        for domain, keywords in DOMAIN_KEYWORDS.items():
+            if any(kw in brief_lower for kw in keywords):
+                detected_domains.append(domain)
+        
+        if not detected_domains:
+            return results, "general"
+        
+        # Apply domain-specific boosting
+        for result in results:
+            keyword_lower = result["keyword"].lower()
+            text_lower = result["text"].lower()
+            boost_factor = 1.0
+            
+            for domain in detected_domains:
+                domain_keywords = DOMAIN_KEYWORDS[domain]
+                # Count keyword matches in both keyword and text
+                matches = sum(1 for kw in domain_keywords if kw in keyword_lower or kw in text_lower)
+                if matches > 0:
+                    boost_factor += 0.1 * matches  # 10% boost per matching keyword
+            
+            result["domain_boost"] = boost_factor
+        
+        return results, detected_domains[0] if len(detected_domains) == 1 else "multi-domain"
 
-    faiss_scores_norm = normalize_faiss_scores(sims)
+    # Normalize FAISS cosine similarity scores to 0-1 range
+    faiss_scores_norm = normalize((sims + 1) / 2)  # Shift [-1,1] to [0,1] then normalize
     faiss_results = {}
     for j, i in enumerate(idxs):
         if i != -1 and i < len(docs):
@@ -245,21 +285,8 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
             query_tokens = brief.lower().replace('、', ' ').replace('。', ' ').split()
             bm_scores = bm25.get_scores(query_tokens)
             
-            # Normalize BM25 scores
-            def normalize_bm25_scores(scores):
-                """Normalize BM25 scores to 0-1 range"""
-                if len(scores) == 0 or np.max(scores) == 0:
-                    return scores
-                # Use robust normalization to handle outliers
-                scores = np.array(scores)
-                q75, q25 = np.percentile(scores, [75, 25])
-                iqr = q75 - q25
-                if iqr > 0:
-                    # Cap outliers and normalize
-                    scores = np.clip(scores, 0, q75 + 1.5 * iqr)
-                return scores / (np.max(scores) + 1e-8)
-            
-            bm_scores_norm = normalize_bm25_scores(bm_scores)
+            # Normalize BM25 scores using the standard normalize function
+            bm_scores_norm = normalize(np.maximum(bm_scores, 0))  # Ensure non-negative before normalize
             bm_ranked = np.argsort(bm_scores_norm)[::-1][:search_k]
             
             for rank, i in enumerate(bm_ranked):
@@ -275,7 +302,7 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
             print(f"⚠️ BM25 scoring failed: {e}")
             bm25_results = {}
 
-    # Hybrid scoring: 0.7 * FAISS + 0.3 * BM25
+    # Hybrid scoring: 0.7 * FAISS + 0.3 * BM25 with domain boosting
     FAISS_WEIGHT = 0.7
     BM25_WEIGHT = 0.3
     
@@ -286,7 +313,7 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
         faiss_score = faiss_results.get(keyword, {}).get("faiss_score", 0)
         bm25_score = bm25_results.get(keyword, {}).get("bm25_score", 0)
         
-        # Hybrid score calculation
+        # Base hybrid score calculation
         hybrid_score = FAISS_WEIGHT * faiss_score + BM25_WEIGHT * bm25_score
         
         # Get text from either result
@@ -302,9 +329,19 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
             "faiss_rank": faiss_results.get(keyword, {}).get("faiss_rank", 999),
             "bm25_rank": bm25_results.get(keyword, {}).get("bm25_rank", 999)
         }
+    
+    # Apply domain-specific boosting
+    combined_list = list(combined_results.values())
+    boosted_results, detected_domain = detect_domain_and_boost(brief, combined_list)
+    
+    # Update hybrid scores with domain boost
+    for result in boosted_results:
+        boost = result.get("domain_boost", 1.0)
+        result["hybrid_score"] *= boost
+        result["boosted"] = boost > 1.0
 
-    # Sort by hybrid score and select top_k
-    ranked_results = sorted(combined_results.values(), 
+    # Sort by boosted hybrid score and select top_k
+    ranked_results = sorted(boosted_results, 
                           key=lambda x: x["hybrid_score"], 
                           reverse=True)[:top_k]
     
@@ -336,7 +373,7 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
     if validation['issues']:
         quality_info += f" (Issues: {len(validation['issues'])})"
     
-    print(f"🔍 Retrieval completed in {retrieval_time}s - Found {len(retrieved)} docs (FAISS: {len(faiss_results)}, BM25: {len(bm25_results)}) - {quality_info}")
+    print(f"🔍 Retrieval completed in {retrieval_time}s - Found {len(retrieved)} docs (FAISS: {len(faiss_results)}, BM25: {len(bm25_results)}) - Domain: {detected_domain} - {quality_info}")
     
     # Add validation metadata to results
     for result in retrieved:
@@ -360,14 +397,15 @@ def generate_segments(brief, retrieved_docs, rdb=None):
     import json, os, time
     from openai import OpenAI
 
+    # Enhanced cache check with immediate return
     cache_key = f"generate:{brief}"
-    if rdb and rdb.exists(cache_key):
+    if rdb and (cached := rdb.get(cache_key)):
         print("⚡ Returning cached generation result")
-        return json.loads(rdb.get(cache_key))
+        return json.loads(cached)
 
     start = time.time()
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    model = os.getenv("OPENAI_GEN_MODEL", "gpt-4o-mini")
+    model = os.getenv("MODEL_GENERATION", os.getenv("OPENAI_GEN_MODEL", "gpt-4o-mini"))
 
     # Trim long texts for token efficiency
     docs_text = "\n\n".join([
@@ -477,6 +515,7 @@ def generate_segments(brief, retrieved_docs, rdb=None):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.4,
+            top_p=0.95,
             max_completion_tokens=800,
         )
 
@@ -495,57 +534,118 @@ def generate_segments(brief, retrieved_docs, rdb=None):
             if not isinstance(parsed, list):
                 raise ValueError("Response must be a JSON array")
             
+            # Strict validation with automatic re-prompt if needed
+            def validate_and_fix_segments(segments):
+                """Strict validation with automatic re-prompt for incomplete segments."""
+                required_fields = ["name", "reason", "keywords", "headlines", "description"]
+                needs_reprompt = False
+                
+                for i, segment in enumerate(segments):
+                    # Check for required fields and empty content
+                    for field in required_fields:
+                        if field not in segment or not segment[field] or segment[field] == "（未入力）":
+                            segment[field] = "（未入力）"
+                            needs_reprompt = True
+                    
+                    # Check for placeholder text that indicates incomplete generation
+                    problematic_phrases = ["説明がありません", "No description", "未入力", "（未入力）"]
+                    for field in ["reason", "description"]:
+                        if field in segment and any(phrase in str(segment[field]) for phrase in problematic_phrases):
+                            needs_reprompt = True
+                
+                return segments, needs_reprompt
+            
             # Enhanced validation and quality assurance
+            parsed, needs_reprompt = validate_and_fix_segments(parsed)
+            
+            # Automatic re-prompt if validation fails
+            if needs_reprompt:
+                print("🔄 Incomplete generation detected, re-prompting...")
+                reprompt = f"""上記のJSONを完全に埋め直してください。空欄を残さず、日本語で自然に書いてください。
+
+以下の形式で必ず全てのフィールドを埋めてください：
+[
+  {{
+    "name": "セグメント名（必須）",
+    "reason": "適している理由を1-2文で（必須）",
+    "keywords": ["キーワード1", "キーワード2", "キーワード3"]（必須）,
+    "headlines": ["見出し1", "見出し2"]（必須）,
+    "description": "詳細説明を2-3文で（必須）"
+  }}
+]
+
+キャンペーン概要: {brief}
+参照情報: {docs_text[:1000]}
+
+JSON形式のみで出力してください："""
+
+                try:
+                    retry_resp = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "日本語で完全なJSONを生成してください。空欄は絶対に残さないでください。"},
+                            {"role": "user", "content": reprompt}
+                        ],
+                        temperature=0.4,
+                        top_p=0.95,
+                        max_completion_tokens=800,
+                    )
+                    
+                    retry_text = retry_resp.choices[0].message.content.strip()
+                    if retry_text.startswith("```"):
+                        lines = retry_text.split("\n")
+                        retry_text = "\n".join(lines[1:-1]) if len(lines) > 2 else retry_text
+                        retry_text = retry_text.strip()
+                    
+                    retry_parsed = json.loads(retry_text)
+                    if isinstance(retry_parsed, list) and len(retry_parsed) > 0:
+                        parsed = retry_parsed
+                        print("✅ Re-prompt successful")
+                    
+                except Exception as retry_e:
+                    print(f"⚠️ Re-prompt failed: {retry_e}")
+            
+            # Final validation and cleanup
             for i, segment in enumerate(parsed):
                 # Ensure all required fields exist with quality content
                 if "name" not in segment or not segment["name"].strip():
                     segment["name"] = f"セグメント{i+1}"
                 
                 if "reason" not in segment or not segment["reason"].strip():
-                    if segment.get("description"):
-                        # Extract first sentence from description as reason
-                        desc_sentences = segment["description"].split("。")
-                        segment["reason"] = desc_sentences[0].strip() + "。" if desc_sentences[0].strip() else "このセグメントは対象キャンペーンに適しています。"
-                    else:
-                        segment["reason"] = "このセグメントは対象キャンペーンに適しています。"
+                    segment["reason"] = "このセグメントは対象キャンペーンに適しています。"
                 
                 if "keywords" not in segment or not isinstance(segment["keywords"], list) or len(segment["keywords"]) == 0:
-                    # Generate basic keywords from brief and segment name
                     brief_words = brief.replace('、', ' ').replace('。', ' ').split()
                     name_words = segment["name"].replace('>', ' ').replace('＆', ' ').split()
                     segment["keywords"] = (brief_words[:2] + name_words[:2])[:3] if brief_words or name_words else ["商品", "サービス", "おすすめ"]
                 
                 if "headlines" not in segment or not isinstance(segment["headlines"], list) or len(segment["headlines"]) == 0:
-                    # Generate compelling headlines based on segment name and domain
                     name_clean = segment["name"].split('>')[-1].strip() if '>' in segment["name"] else segment["name"]
-                    segment["headlines"] = [
-                        f"{name_clean}で新しい体験を",
-                        f"あなたにぴったりの{name_clean}"
-                    ]
+                    segment["headlines"] = [f"{name_clean}特集", f"人気の{name_clean}"]
                 
                 if "description" not in segment or not segment["description"].strip():
-                    # Generate description from reason and context
                     segment["description"] = f"{segment['reason']} {config['context']}、このセグメントの商品やサービスがお客様のニーズにお応えします。"
                 
-                # Quality checks - remove generic phrases and improve content
+                # Remove problematic placeholder text
+                replacements = {
+                    "最適": "ぴったり",
+                    "豊富に揃う": "多彩な選択肢", 
+                    "充実した": "幅広い",
+                    "説明がありません": "魅力的な商品をご提案",
+                    "No description": "お客様のニーズにお応えする商品",
+                    "（未入力）": "お客様に最適な商品"
+                }
+                
                 for field in ["reason", "description"]:
                     if field in segment:
-                        content = segment[field]
-                        # Replace generic phrases with more specific ones
-                        replacements = {
-                            "最適": "ぴったり",
-                            "豊富に揃う": "多彩な選択肢",
-                            "充実した": "幅広い",
-                            "説明がありません": "魅力的な商品をご提案",
-                            "No description": "お客様のニーズにお応えする商品"
-                        }
+                        content = str(segment[field])
                         for old, new in replacements.items():
                             content = content.replace(old, new)
                         segment[field] = content
                 
                 # Ensure headlines are within character limit
                 if "headlines" in segment:
-                    segment["headlines"] = [h[:20] + "..." if len(h) > 20 else h for h in segment["headlines"][:2]]
+                    segment["headlines"] = [h[:20] for h in segment["headlines"][:2]]
                     
         except Exception as e:
             print(f"⚠️ Could not parse JSON: {e}")
