@@ -42,16 +42,22 @@ def embed_text(text, cache_key=None, rdb=None):
 # RETRIEVAL CORE
 # ---------------------------
 def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index=None, docs=None, rdb=None):
-    """Hybrid retrieval from FAISS + BM25."""
+    """Hybrid retrieval from FAISS + BM25, with Flask and standalone fallback."""
 
-    # Safely check if Flask context is active
-    if has_app_context():
+    try:
+        from flask import has_app_context, current_app
+        in_context = has_app_context()
+    except Exception:
+        in_context = False
+
+    if in_context:
         index = index or getattr(current_app, "faiss_index", None)
         docs = docs or getattr(current_app, "docs", None)
         bm25 = getattr(current_app, "bm25", None)
         rdb = rdb or getattr(current_app, "rdb", None)
+        print("🧠 Using Flask app context for retrieval.")
     else:
-        # Fallback: manually load from app if running standalone (Vercel subprocess)
+        # Fallback: manually enter app context
         try:
             from app import app
             with app.app_context():
@@ -59,21 +65,16 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
                 docs = docs or getattr(app, "docs", None)
                 bm25 = getattr(app, "bm25", None)
                 rdb = rdb or getattr(app, "rdb", None)
+                print("🔁 Loaded FAISS/docs via app.app_context() fallback.")
         except Exception as e:
-            print(f"⚠️ Context load failed: {e}")
+            print(f"⚠️ Failed to load app context: {e}")
 
     if not index or not docs:
-        raise RuntimeError("❌ FAISS index or docs not loaded in app context or fallback")
-
-    cache_key = f"embed:{brief}"
-    q_emb = embed_text(brief, cache_key, rdb)
-    ...
-
+        raise RuntimeError("❌ FAISS index or docs not loaded (both context and fallback failed)")
 
     cache_key = f"embed:{brief}"
     q_emb = embed_text(brief, cache_key, rdb)
 
-    # Normalize and search FAISS
     q_emb = q_emb / (np.linalg.norm(q_emb) + 1e-12)
     sims, idxs = index.search(np.array([q_emb], dtype="float32"), top_k)
     sims, idxs = sims[0], idxs[0]
@@ -90,10 +91,8 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
         if i != -1
     ]
 
-
-    # BM25 fallback
     bm25_results = []
-    if bm25:
+    if 'bm25' in locals() and bm25:
         bm_scores = bm25.get_scores(brief.split())
         bm_ranked = np.argsort(bm_scores)[::-1][:top_k]
         bm25_results = [
@@ -101,7 +100,6 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
             for i in bm_ranked
         ]
 
-    # Combine FAISS + BM25 weighted
     combined = {}
     for item in faiss_results:
         combined[item["keyword"]] = kw_weight * item["score"]
@@ -110,15 +108,15 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
 
     ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
     retrieved = [
-        {"keyword": k, "score": round(v * 100, 2), "text": next(d["text"] for d in docs if d["keyword"] == k)}
+        {"keyword": k, "score": round(v, 2), "text": next(d["text"] for d in docs if d["keyword"] == k)}
         for k, v in ranked
     ]
-
-    # Cache retrievals
+    
     if rdb:
         rdb.set(f"retrieval:{brief}", json.dumps(retrieved, ensure_ascii=False))
 
     return retrieved
+
 
 
 # ---------------------------
