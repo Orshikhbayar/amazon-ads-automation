@@ -19,7 +19,7 @@ from _12 import retrieve_docs, generate_segments
 # ---------------------------
 # ENV + PATH HELPERS
 # ---------------------------
-load_dotenv()  # load .env at startup
+load_dotenv(override=True)  # load .env at startup, override existing env vars
 
 def _path(*parts):
     p1 = os.path.join("data", *parts)
@@ -186,7 +186,7 @@ def health():
 # ---------------------------
 def run_12py(args_list):
     """Run 12.py safely from absolute path."""
-    script_path = os.path.join(BASE_DIR, "12.py")
+    script_path = os.path.join(BASE_DIR, "_12.py")
     if not os.path.exists(script_path):
         return 1, "", "12.py not found"
     cmd = [sys.executable, script_path] + args_list
@@ -284,30 +284,40 @@ def retrieve_segments():
 # GENERATE SEGMENTS
 # ---------------------------
 @app.route("/api/generate", methods=["POST"])
-def generate_segments():
+def generate_segments_route():
     try:
         data = request.get_json(force=True)
         campaign_brief = data.get("campaign_brief", "").strip()
         top_k = int(data.get("top_k", 3))
         keyword_weight = float(data.get("keyword_weight", 0.4))
-        enable_keywords = bool(data.get("enable_keywords", True))
 
         if not campaign_brief:
             return jsonify({"error": "Campaign brief is required"}), 400
 
-        args = [
-            "--brief", campaign_brief,
-            "--top-k", str(top_k),
-            "--kw-weight", str(keyword_weight)
+        # ✅ Call retrieve_docs and generate_segments directly
+        from _12 import retrieve_docs, generate_segments
+        
+        retrieved = retrieve_docs(
+            campaign_brief,
+            top_k=top_k,
+            kw_weight=keyword_weight,
+            index=current_app.faiss_index,
+            docs=current_app.docs,
+            rdb=current_app.rdb
+        )
+        
+        # Format retrieved segments for response
+        segments = [
+            {
+                "name": r["keyword"],
+                "match_percent": r["score"]
+            }
+            for r in retrieved
         ]
-        if not enable_keywords:
-            args.append("--no-extract")
-
-        code, out, err = run_12py(args)
-        if code != 0:
-            return jsonify({"error": err}), 500
-
-        segments, generated = parse_full_output(out, campaign_brief)
+        
+        # Generate new segments
+        generated = generate_segments(campaign_brief, retrieved, rdb=current_app.rdb)
+        
         return jsonify({
             "segments": segments,
             "generated_segments": generated,

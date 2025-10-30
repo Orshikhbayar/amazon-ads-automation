@@ -15,7 +15,7 @@ from flask import current_app
 from embedding import get_embeddings_batch
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
-
+from flask import has_app_context, current_app
 # ---------------------------
 # CONFIG
 # ---------------------------
@@ -42,20 +42,39 @@ def embed_text(text, cache_key=None, rdb=None):
 # RETRIEVAL CORE
 # ---------------------------
 def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index=None, docs=None, rdb=None):
-    """Hybrid retrieval from FAISS + BM25."""
-    # Use Flask globals if not provided
-    index = index or getattr(current_app, "faiss_index", None)
-    docs = docs or getattr(current_app, "docs", None)
-    bm25 = getattr(current_app, "bm25", None)
-    rdb = rdb or getattr(current_app, "rdb", None)
+    """Hybrid retrieval from FAISS + BM25, with Flask and standalone fallback."""
+
+    try:
+        from flask import has_app_context, current_app
+        in_context = has_app_context()
+    except Exception:
+        in_context = False
+
+    if in_context:
+        index = index or getattr(current_app, "faiss_index", None)
+        docs = docs or getattr(current_app, "docs", None)
+        bm25 = getattr(current_app, "bm25", None)
+        rdb = rdb or getattr(current_app, "rdb", None)
+        print("🧠 Using Flask app context for retrieval.")
+    else:
+        # Fallback: manually enter app context
+        try:
+            from app import app
+            with app.app_context():
+                index = index or getattr(app, "faiss_index", None)
+                docs = docs or getattr(app, "docs", None)
+                bm25 = getattr(app, "bm25", None)
+                rdb = rdb or getattr(app, "rdb", None)
+                print("🔁 Loaded FAISS/docs via app.app_context() fallback.")
+        except Exception as e:
+            print(f"⚠️ Failed to load app context: {e}")
 
     if not index or not docs:
-        raise RuntimeError("❌ FAISS index or docs not loaded in app context")
+        raise RuntimeError("❌ FAISS index or docs not loaded (both context and fallback failed)")
 
     cache_key = f"embed:{brief}"
     q_emb = embed_text(brief, cache_key, rdb)
 
-    # Normalize and search FAISS
     q_emb = q_emb / (np.linalg.norm(q_emb) + 1e-12)
     sims, idxs = index.search(np.array([q_emb], dtype="float32"), top_k)
     sims, idxs = sims[0], idxs[0]
@@ -72,10 +91,8 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
         if i != -1
     ]
 
-
-    # BM25 fallback
     bm25_results = []
-    if bm25:
+    if 'bm25' in locals() and bm25:
         bm_scores = bm25.get_scores(brief.split())
         bm_ranked = np.argsort(bm_scores)[::-1][:top_k]
         bm25_results = [
@@ -83,7 +100,6 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
             for i in bm_ranked
         ]
 
-    # Combine FAISS + BM25 weighted
     combined = {}
     for item in faiss_results:
         combined[item["keyword"]] = kw_weight * item["score"]
@@ -92,56 +108,100 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
 
     ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
     retrieved = [
-        {"keyword": k, "score": round(v * 100, 2), "text": next(d["text"] for d in docs if d["keyword"] == k)}
+        {"keyword": k, "score": round(v, 2), "text": next(d["text"] for d in docs if d["keyword"] == k)}
         for k, v in ranked
     ]
-
-    # Cache retrievals
+    
     if rdb:
         rdb.set(f"retrieval:{brief}", json.dumps(retrieved, ensure_ascii=False))
 
     return retrieved
 
 
+
 # ---------------------------
 # GENERATION
 # ---------------------------
-def generate_segments(brief, retrieved_docs):
-    """Generate audience segments via OpenAI."""
+def generate_segments(brief, retrieved_docs, rdb=None):
+    """
+    Generate Japanese audience segments quickly and reuse cached results.
+    """
+    import json, os, time
+    from openai import OpenAI
+
+    cache_key = f"generate:{brief}"
+    if rdb and rdb.exists(cache_key):
+        print("⚡ Returning cached generation result")
+        return json.loads(rdb.get(cache_key))
+
+    start = time.time()
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = os.getenv("OPENAI_GEN_MODEL", "gpt-4o-mini")
 
-    docs_text = "\n\n".join([f"- {d['keyword']}: {d['text']}" for d in retrieved_docs])
+    # Trim long texts for token efficiency
+    docs_text = "\n\n".join([
+        f"【セグメント名】{d['keyword']}\n{d['text'][:500]}"
+        for d in retrieved_docs
+    ])
+
     prompt = f"""
-You are a Japanese Amazon marketing strategist.
-Given the campaign brief and related documents, identify 3–5 target audience segments.
+次のキャンペーン概要と既存のセグメント情報を参考に、
+それぞれのセグメント名（【セグメント名】で示されている部分）を
+そのまま使用して、日本語で「適合理由」「キーワード」「見出し」「説明」を生成してください。
 
-Brief:
+出力は以下のJSONフォーマットで返してください:
+[
+  {{
+    "segment_name": "〇〇〇",
+    "reason": "～",
+    "keywords": ["～", "～"],
+    "headings": ["～", "～"],
+    "description": "～"
+  }}
+]
+
+キャンペーン概要:
 {brief}
 
-Documents:
+参照セグメント:
 {docs_text}
-
-Format each segment as:
-**Segment N: <segment name>**
-**Why it fits:** ...
-**Keywords:** ...
-• headline1
-• headline2
-**Description:** ...
 """
 
-    resp = client.chat.completions.create(
-        model=os.getenv("OPENAI_GEN_MODEL", "gpt-4o-mini"),
-        messages=[
-            {"role": "system", "content": "You are an expert Japanese Amazon marketer."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.5,
-        max_completion_tokens=800,
-    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "あなたは日本のAmazonマーケティング専門家です。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.5,
+            max_completion_tokens=700,
+        )
 
-    text = resp.choices[0].message.content.strip()
-    return text
+        text = resp.choices[0].message.content.strip()
+        
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+            text = text.strip()
+        
+        try:
+            parsed = json.loads(text)
+        except Exception as e:
+            print(f"⚠️ Could not parse JSON: {e}")
+            parsed = [{"segment_name": "未解析出力", "description": text}]
+
+        if rdb:
+            rdb.setex(cache_key, 600, json.dumps(parsed, ensure_ascii=False))
+
+        print(f"✅ Generation done in {round(time.time()-start,2)}s ({model})")
+        return parsed
+
+    except Exception as e:
+        print("❌ Generation error:", e)
+        return [{"error": str(e)}]
+
 
 
 # ---------------------------
