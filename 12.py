@@ -122,43 +122,79 @@ def retrieve_docs(brief, top_k=TOP_K_DEFAULT, kw_weight=KW_WEIGHT_DEFAULT, index
 # ---------------------------
 # GENERATION
 # ---------------------------
-def generate_segments(brief, retrieved_docs):
-    """Generate audience segments via OpenAI."""
+def generate_segments(brief, retrieved_docs, rdb=None):
+    """
+    Generate Japanese audience segments quickly and reuse cached results.
+    """
+    import json, os, time
+    from openai import OpenAI
+
+    cache_key = f"generate:{brief}"
+    if rdb and rdb.exists(cache_key):
+        print("⚡ Returning cached generation result")
+        return json.loads(rdb.get(cache_key))
+
+    start = time.time()
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = os.getenv("OPENAI_GEN_MODEL", "gpt-4o-mini")
 
-    docs_text = "\n\n".join([f"- {d['keyword']}: {d['text']}" for d in retrieved_docs])
+    # Trim long texts for token efficiency
+    docs_text = "\n\n".join([
+        f"【セグメント名】{d['keyword']}\n{d['text'][:500]}"
+        for d in retrieved_docs
+    ])
+
     prompt = f"""
-You are a Japanese Amazon marketing strategist.
-Given the campaign brief and related documents, identify 3–5 target audience segments.
+次のキャンペーン概要と既存のセグメント情報を参考に、
+それぞれのセグメント名（【セグメント名】で示されている部分）を
+そのまま使用して、日本語で「適合理由」「キーワード」「見出し」「説明」を生成してください。
 
-Brief:
+出力は以下のJSONフォーマットで返してください:
+[
+  {{
+    "segment_name": "〇〇〇",
+    "reason": "～",
+    "keywords": ["～", "～"],
+    "headings": ["～", "～"],
+    "description": "～"
+  }}
+]
+
+キャンペーン概要:
 {brief}
 
-Documents (each has a segment name and text):
-{ "\n".join([f"{d['keyword']}: {d['text']}" for d in retrieved_docs]) }
-Please write audience segments using the same names (keywords) as shown above when possible.
-
-Format each segment as:
-**Segment N: <segment name>**
-**Why it fits:** ...
-**Keywords:** ...
-• headline1
-• headline2
-**Description:** ...
+参照セグメント:
+{docs_text}
 """
 
-    resp = client.chat.completions.create(
-        model=os.getenv("OPENAI_GEN_MODEL", "gpt-4o-mini"),
-        messages=[
-            {"role": "system", "content": "You are an expert Japanese Amazon marketer."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.5,
-        max_completion_tokens=800,
-    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "あなたは日本のAmazonマーケティング専門家です。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.5,
+            max_completion_tokens=700,
+        )
 
-    text = resp.choices[0].message.content.strip()
-    return text
+        text = resp.choices[0].message.content.strip()
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            print("⚠️ Could not parse JSON, returning raw text")
+            parsed = [{"segment_name": "未解析出力", "description": text}]
+
+        if rdb:
+            rdb.setex(cache_key, 600, json.dumps(parsed, ensure_ascii=False))
+
+        print(f"✅ Generation done in {round(time.time()-start,2)}s ({model})")
+        return parsed
+
+    except Exception as e:
+        print("❌ Generation error:", e)
+        return [{"error": str(e)}]
+
 
 
 # ---------------------------
