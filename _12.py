@@ -475,7 +475,9 @@ def generate_segments(brief, retrieved_docs, rdb=None):
 あなたは日本のAmazonマーケティング戦略担当者です。
 以下のキャンペーン概要と関連商品情報をもとに、4〜5個のターゲットオーディエンスセグメントを提案してください。
 
-**重要：各セグメントには必ず「適合理由（reason）」フィールドを含めてください。なぜこのセグメントがキャンペーンに合うのかを1〜2文の自然な日本語で説明してください。**
+**重要：各セグメントには必ず「適合理由（reason）」と「説明（description）」フィールドを含めてください。**
+- **適合理由（reason）**: なぜこのセグメントがキャンペーンに合うのかを1〜2文の自然な日本語で説明
+- **説明（description）**: ターゲット層や商品特徴を踏まえた詳細説明を2〜3文の自然な日本語で記述
 
 **出力形式（必ずこの構造のJSON配列で出力）:**
 [
@@ -643,7 +645,14 @@ JSON形式のみで出力してください："""
                     segment["reason"] = (
                         f"{segment.get('name', 'このセグメント')} は、"
                         "ターゲット層の関心やライフスタイルに合致しており、"
-                        "商品の魅力を自然に伝えるのに最適です。"
+                        "製品の魅力を自然に伝えるのに最適です。"
+                    )
+                
+                # Enhanced description field fallback processing
+                if "description" not in segment or not segment["description"].strip() or "説明" in segment.get("description", ""):
+                    segment["description"] = (
+                        "このセグメントに関連する商品は、日常生活を豊かにし、"
+                        "ターゲット層のニーズに寄り添う内容です。"
                     )
                 
                 if "keywords" not in segment or not isinstance(segment["keywords"], list) or len(segment["keywords"]) == 0:
@@ -720,24 +729,37 @@ JSON形式のみで出力してください："""
         required_fields = ["name", "reason", "keywords", "headlines", "description"]
         for seg in parsed:
             for field in required_fields:
-                if not seg.get(field):
+                if not seg.get(field) or (isinstance(seg[field], str) and seg[field].strip() == "") or (isinstance(seg[field], list) and len(seg[field]) == 0):
                     if field == "reason":
                         seg[field] = (
                             f"{seg.get('name', 'このセグメント')} は、"
                             "ターゲット層の関心やライフスタイルに合致しており、"
-                            "商品の魅力を自然に伝えるのに最適です。"
+                            "製品の魅力を自然に伝えるのに最適です。"
+                        )
+                    elif field == "description":
+                        seg[field] = (
+                            "このセグメントに関連する商品は、日常生活を豊かにし、"
+                            "ターゲット層のニーズに寄り添う内容です。"
                         )
                     else:
                         seg[field] = "（自動補完）"
             
-            # Extra check for empty or placeholder reason fields
+            # Extra check for empty or placeholder reason and description fields
             if (seg.get("reason") == "（自動補完）" or 
                 "説明がありません" in str(seg.get("reason", "")) or
                 len(str(seg.get("reason", "")).strip()) < 5):
                 seg["reason"] = (
                     f"{seg.get('name', 'このセグメント')} は、"
                     "ターゲット層の関心やライフスタイルに合致しており、"
-                    "商品の魅力を自然に伝えるのに最適です。"
+                    "製品の魅力を自然に伝えるのに最適です。"
+                )
+            
+            if (seg.get("description") == "（自動補完）" or 
+                "説明がありません" in str(seg.get("description", "")) or
+                len(str(seg.get("description", "")).strip()) < 5):
+                seg["description"] = (
+                    "このセグメントに関連する商品は、日常生活を豊かにし、"
+                    "ターゲット層のニーズに寄り添う内容です。"
                 )
 
         # Cache successful results for faster subsequent requests
