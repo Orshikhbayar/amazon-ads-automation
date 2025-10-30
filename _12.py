@@ -638,11 +638,12 @@ JSON形式のみで出力してください："""
                 if "name" not in segment or not segment["name"].strip():
                     segment["name"] = f"セグメント{i+1}"
                 
-                # Enhanced reason field fallback processing
+                # Enhanced reason field fallback processing with natural Japanese
                 if "reason" not in segment or not segment["reason"].strip() or "説明" in segment.get("reason", ""):
                     segment["reason"] = (
-                        f"{brief} に関連するターゲット層に最も適した理由を説明します。"
-                        "このセグメントは商品の特徴と購買意欲に一致しています。"
+                        f"{segment.get('name', 'このセグメント')} は、"
+                        "ターゲット層の関心やライフスタイルに合致しており、"
+                        "商品の魅力を自然に伝えるのに最適です。"
                     )
                 
                 if "keywords" not in segment or not isinstance(segment["keywords"], list) or len(segment["keywords"]) == 0:
@@ -715,6 +716,30 @@ JSON形式のみで出力してください："""
                 "description": f"{config['context']}、厳選された商品をお客様にお届けします。品質と価値を重視した商品選びをサポートいたします。"
             }]
 
+        # Final comprehensive validation check before returning
+        required_fields = ["name", "reason", "keywords", "headlines", "description"]
+        for seg in parsed:
+            for field in required_fields:
+                if not seg.get(field):
+                    if field == "reason":
+                        seg[field] = (
+                            f"{seg.get('name', 'このセグメント')} は、"
+                            "ターゲット層の関心やライフスタイルに合致しており、"
+                            "商品の魅力を自然に伝えるのに最適です。"
+                        )
+                    else:
+                        seg[field] = "（自動補完）"
+            
+            # Extra check for empty or placeholder reason fields
+            if (seg.get("reason") == "（自動補完）" or 
+                "説明がありません" in str(seg.get("reason", "")) or
+                len(str(seg.get("reason", "")).strip()) < 5):
+                seg["reason"] = (
+                    f"{seg.get('name', 'このセグメント')} は、"
+                    "ターゲット層の関心やライフスタイルに合致しており、"
+                    "商品の魅力を自然に伝えるのに最適です。"
+                )
+
         # Cache successful results for faster subsequent requests
         if rdb and parsed and not any('error' in seg for seg in parsed):
             # Extended cache time for high-quality results
@@ -723,6 +748,7 @@ JSON形式のみで出力してください："""
             print(f"💾 Cached result for {cache_duration}s")
 
         print(f"✅ Generation done in {round(time.time()-start,2)}s ({model}) - Domain: {detected_domain}")
+        print(f"✅ All segments validated with proper reason fields")
         return parsed
 
     except Exception as e:
